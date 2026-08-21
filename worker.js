@@ -6,19 +6,28 @@ export default {
     if (url.pathname === "/") {
       return json({
         ok: true,
-        service: "Yuzuho X Bridge",
-        clientIdConfigured: !!env.X_CLIENT_ID,
-        clientSecretConfigured: !!env.X_CLIENT_SECRET
+        service: "Yuzuho X Bridge"
       });
     }
 
-    // X接続確認
+    // 認証チェック
+    const authHeader = request.headers.get("Authorization");
+    const expectedAuth = `Bearer ${env.WORKER_API_KEY}`;
+
+    if (!env.WORKER_API_KEY || authHeader !== expectedAuth) {
+      return json({
+        ok: false,
+        error: "Unauthorized"
+      }, 401);
+    }
+
+    // Xプロフィール取得
     if (url.pathname === "/x/me" && request.method === "GET") {
       if (!env.X_ACCESS_TOKEN) {
         return json({
           ok: false,
-          error: "X_ACCESS_TOKEN is not configured yet"
-        }, 401);
+          error: "X_ACCESS_TOKEN is not configured"
+        }, 500);
       }
 
       const response = await fetch(
@@ -38,8 +47,8 @@ export default {
       if (!env.X_ACCESS_TOKEN) {
         return json({
           ok: false,
-          error: "X_ACCESS_TOKEN is not configured yet"
-        }, 401);
+          error: "X_ACCESS_TOKEN is not configured"
+        }, 500);
       }
 
       let body;
@@ -47,7 +56,10 @@ export default {
       try {
         body = await request.json();
       } catch {
-        return json({ ok: false, error: "Invalid JSON" }, 400);
+        return json({
+          ok: false,
+          error: "Invalid JSON"
+        }, 400);
       }
 
       if (!body.text || typeof body.text !== "string") {
