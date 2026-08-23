@@ -3,7 +3,7 @@ export default {
     const url = new URL(request.url);
 
     // ========================================
-    // 1. Worker自体の動作確認
+    // 1. Worker動作確認
     // ========================================
     if (url.pathname === "/") {
       return json({
@@ -11,17 +11,146 @@ export default {
         service: "Yuzuho Bridge",
         features: {
           x: true,
-          masterAssets: true
+          masterAssets: true,
+          publicMasterAssets: true
         }
       });
     }
 
-    // ========================================
-    // 2. ChatGPT → Worker 認証
-    // ========================================
-    const workerKey = request.headers.get("X-Worker-Key");
 
-    if (!env.WORKER_API_KEY || workerKey !== env.WORKER_API_KEY) {
+    // ========================================
+    // 2. PUBLIC MASTER
+    //
+    // ここだけ認証なし。
+    // Custom GPT / 画像生成側から直接参照するため。
+    //
+    // FACE:
+    // /master-public/face/front.png
+    // /master-public/face/right45.png
+    // ...
+    //
+    // BODY:
+    // /master-public/body/front.png
+    // /master-public/body/angle45.png
+    // ...
+    // ========================================
+    if (
+      request.method === "GET" &&
+      url.pathname.startsWith("/master-public/")
+    ) {
+      if (!env.ASSETS) {
+        return json(
+          {
+            ok: false,
+            error: "ASSETS binding is not configured"
+          },
+          500
+        );
+      }
+
+      const match = url.pathname.match(
+        /^\/master-public\/(face|body)\/([a-zA-Z0-9_-]+)\.png$/
+      );
+
+      if (!match) {
+        return json(
+          {
+            ok: false,
+            error: "Invalid MASTER URL"
+          },
+          400
+        );
+      }
+
+      const type = match[1];
+      const masterId = match[2];
+
+      const allowedFace = [
+        "front",
+        "right45",
+        "left45",
+        "down_angle",
+        "smile",
+        "back"
+      ];
+
+      const allowedBody = [
+        "front",
+        "angle45",
+        "side",
+        "back",
+        "back45",
+        "relaxed"
+      ];
+
+      const allowed =
+        type === "face" ? allowedFace : allowedBody;
+
+      if (!allowed.includes(masterId)) {
+        return json(
+          {
+            ok: false,
+            error: "Unknown MASTER"
+          },
+          404
+        );
+      }
+
+      // public/masters/... をCloudflare Assetsから取得
+      const assetUrl = new URL(request.url);
+      assetUrl.pathname = `/masters/${type}/${masterId}.png`;
+      assetUrl.search = "";
+
+      const assetRequest = new Request(
+        assetUrl.toString(),
+        {
+          method: "GET",
+          headers: request.headers
+        }
+      );
+
+      const response = await env.ASSETS.fetch(assetRequest);
+
+      if (!response.ok) {
+        return json(
+          {
+            ok: false,
+            error: "MASTER asset not found",
+            type,
+            masterId,
+            status: response.status
+          },
+          404
+        );
+      }
+
+      const headers = new Headers(response.headers);
+
+      headers.set("Content-Type", "image/png");
+
+      // MASTER自体は変更頻度が低いためキャッシュ
+      headers.set(
+        "Cache-Control",
+        "public, max-age=3600"
+      );
+
+      return new Response(response.body, {
+        status: 200,
+        headers
+      });
+    }
+
+
+    // ========================================
+    // 3. ここから下は認証必須
+    // ========================================
+    const workerKey =
+      request.headers.get("X-Worker-Key");
+
+    if (
+      !env.WORKER_API_KEY ||
+      workerKey !== env.WORKER_API_KEY
+    ) {
       return json(
         {
           ok: false,
@@ -31,16 +160,21 @@ export default {
       );
     }
 
+
     // ========================================
-    // 3. Xプロフィール取得
+    // 4. Xプロフィール取得
     // GET /x/me
     // ========================================
-    if (url.pathname === "/x/me" && request.method === "GET") {
+    if (
+      url.pathname === "/x/me" &&
+      request.method === "GET"
+    ) {
       if (!env.X_ACCESS_TOKEN) {
         return json(
           {
             ok: false,
-            error: "X_ACCESS_TOKEN is not configured"
+            error:
+              "X_ACCESS_TOKEN is not configured"
           },
           500
         );
@@ -51,7 +185,8 @@ export default {
         {
           method: "GET",
           headers: {
-            Authorization: `Bearer ${env.X_ACCESS_TOKEN}`
+            Authorization:
+              `Bearer ${env.X_ACCESS_TOKEN}`
           }
         }
       );
@@ -59,16 +194,21 @@ export default {
       return proxyJson(response);
     }
 
+
     // ========================================
-    // 4. Xへ投稿
+    // 5. Xへ投稿
     // POST /x/post
     // ========================================
-    if (url.pathname === "/x/post" && request.method === "POST") {
+    if (
+      url.pathname === "/x/post" &&
+      request.method === "POST"
+    ) {
       if (!env.X_ACCESS_TOKEN) {
         return json(
           {
             ok: false,
-            error: "X_ACCESS_TOKEN is not configured"
+            error:
+              "X_ACCESS_TOKEN is not configured"
           },
           500
         );
@@ -88,7 +228,10 @@ export default {
         );
       }
 
-      if (!body.text || typeof body.text !== "string") {
+      if (
+        !body.text ||
+        typeof body.text !== "string"
+      ) {
         return json(
           {
             ok: false,
@@ -103,8 +246,10 @@ export default {
         {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${env.X_ACCESS_TOKEN}`,
-            "Content-Type": "application/json"
+            Authorization:
+              `Bearer ${env.X_ACCESS_TOKEN}`,
+            "Content-Type":
+              "application/json"
           },
           body: JSON.stringify({
             text: body.text
@@ -115,47 +260,52 @@ export default {
       return proxyJson(response);
     }
 
+
     // ========================================
-    // 5. MASTER一覧
+    // 6. MASTERカタログ
     // GET /master/catalog
     // ========================================
-    if (url.pathname === "/master/catalog" && request.method === "GET") {
+    if (
+      url.pathname === "/master/catalog" &&
+      request.method === "GET"
+    ) {
+      const origin = url.origin;
+
       return json({
         ok: true,
 
-        face: {
-          front: "/master/face/front",
-          right45: "/master/face/right45",
-          left45: "/master/face/left45",
-          down_angle: "/master/face/down_angle",
-          smile: "/master/face/smile",
-          back: "/master/face/back"
-        },
+        face: [
+          "front",
+          "right45",
+          "left45",
+          "down_angle",
+          "smile",
+          "back"
+        ],
 
-        body: {
-          front: "/master/body/front",
-          angle45: "/master/body/angle45",
-          side: "/master/body/side",
-          back: "/master/body/back",
-          back45: "/master/body/back45",
-          relaxed: "/master/body/relaxed"
-        }
+        body: [
+          "front",
+          "angle45",
+          "side",
+          "back",
+          "back45",
+          "relaxed"
+        ],
+
+        publicBaseUrl:
+          `${origin}/master-public`
       });
     }
 
+
     // ========================================
-    // 6. MASTER自動選択
-    //
+    // 7. MASTER自動選択
     // POST /master/select
-    //
-    // 例:
-    // {
-    //   "angle": "front",
-    //   "framing": "full_body",
-    //   "expression": "neutral"
-    // }
     // ========================================
-    if (url.pathname === "/master/select" && request.method === "POST") {
+    if (
+      url.pathname === "/master/select" &&
+      request.method === "POST"
+    ) {
       let body;
 
       try {
@@ -170,118 +320,222 @@ export default {
         );
       }
 
-      const angle = normalize(body.angle || "front");
-      const framing = normalize(body.framing || "upper_body");
-      const expression = normalize(body.expression || "neutral");
-      const pose = normalize(body.pose || "");
+      const angle =
+        typeof body.angle === "string"
+          ? body.angle
+          : "front";
 
-      const face = selectFaceMaster(angle, expression);
-      const bodyMaster = selectBodyMaster(angle, framing, pose);
+      const framing =
+        typeof body.framing === "string"
+          ? body.framing
+          : "upper_body";
 
+      const expression =
+        typeof body.expression === "string"
+          ? body.expression
+          : "neutral";
+
+      const pose =
+        typeof body.pose === "string"
+          ? body.pose
+          : "normal";
+
+
+      // --------------------------------------
+      // FACE MASTER選択
+      // --------------------------------------
+      let faceMaster = "front";
+
+      if (expression === "smile") {
+        faceMaster = "smile";
+      } else {
+        switch (angle) {
+          case "right45":
+            faceMaster = "right45";
+            break;
+
+          case "left45":
+            faceMaster = "left45";
+            break;
+
+          case "down_angle":
+            faceMaster = "down_angle";
+            break;
+
+          case "back":
+            faceMaster = "back";
+            break;
+
+          default:
+            faceMaster = "front";
+        }
+      }
+
+
+      // --------------------------------------
+      // BODY MASTER選択
+      // --------------------------------------
+      let bodyMaster = "front";
+
+      if (pose === "relaxed") {
+        bodyMaster = "relaxed";
+      } else {
+        switch (angle) {
+          case "right45":
+          case "left45":
+          case "down_angle":
+            bodyMaster = "angle45";
+            break;
+
+          case "side":
+            bodyMaster = "side";
+            break;
+
+          case "back45":
+            bodyMaster = "back45";
+            break;
+
+          case "back":
+            bodyMaster = "back";
+            break;
+
+          default:
+            bodyMaster = "front";
+        }
+      }
+
+
+      // --------------------------------------
+      // 公開MASTER URL
+      // --------------------------------------
       const origin = url.origin;
+
+      const faceUrl =
+        `${origin}/master-public/face/${faceMaster}.png`;
+
+      const bodyUrl =
+        `${origin}/master-public/body/${bodyMaster}.png`;
+
 
       return json({
         ok: true,
 
-        selection: {
+        request: {
           angle,
           framing,
           expression,
-
-          face: {
-            id: face,
-            url: `${origin}/master/face/${face}`
-          },
-
-          body: bodyMaster
-            ? {
-                id: bodyMaster,
-                url: `${origin}/master/body/${bodyMaster}`
-              }
-            : null
+          pose
         },
 
-        rule:
-          "These files are Yuzuho identity reference masters. Preserve face, hair length, hair texture and body identity. Change only scene, outfit, pose, expression and camera composition."
+        selected: {
+          face: {
+            id: faceMaster,
+            url: faceUrl
+          },
+
+          body: {
+            id: bodyMaster,
+            url: bodyUrl
+          }
+        },
+
+        instructions: {
+          face:
+            "Use FACE MASTER only as Yuzuho identity, facial structure, facial proportions, eyes, nose, mouth, jawline and hairstyle reference.",
+
+          body:
+            "Use BODY MASTER only as Yuzuho body identity, proportions, silhouette and physique reference.",
+
+          preserve:
+            "Do not redesign Yuzuho's face, facial proportions, body proportions or hairstyle unless explicitly requested.",
+
+          scene:
+            "Do not copy clothing, background, lighting or scene from MASTER images unless explicitly requested."
+        }
       });
     }
 
+
     // ========================================
-    // 7. FACE MASTER画像取得
-    //
-    // GET /master/face/front
-    // GET /master/face/right45
-    // 等
+    // 8. 従来の認証付きFACE MASTER
+    // GET /master/face/{masterId}
     // ========================================
     if (
-      url.pathname.startsWith("/master/face/") &&
-      request.method === "GET"
+      request.method === "GET" &&
+      url.pathname.startsWith("/master/face/")
     ) {
-      const id = url.pathname.split("/").pop();
+      const masterId =
+        url.pathname.split("/").pop();
 
-      const faceFiles = {
-        front: "/masters/face/front.png",
-        right45: "/masters/face/right45.png",
-        left45: "/masters/face/left45.png",
-        down_angle: "/masters/face/down_angle.png",
-        smile: "/masters/face/smile.png",
-        back: "/masters/face/back.png"
-      };
+      const allowed = [
+        "front",
+        "right45",
+        "left45",
+        "down_angle",
+        "smile",
+        "back"
+      ];
 
-      const assetPath = faceFiles[id];
-
-      if (!assetPath) {
+      if (!allowed.includes(masterId)) {
         return json(
           {
             ok: false,
-            error: "Unknown face master"
+            error: "Unknown FACE MASTER"
           },
           404
         );
       }
 
-      return serveAsset(request, env, assetPath);
+      return getMasterAsset(
+        request,
+        env,
+        "face",
+        masterId
+      );
     }
 
+
     // ========================================
-    // 8. BODY MASTER画像取得
-    //
-    // GET /master/body/front
-    // GET /master/body/angle45
-    // 等
+    // 9. 従来の認証付きBODY MASTER
+    // GET /master/body/{masterId}
     // ========================================
     if (
-      url.pathname.startsWith("/master/body/") &&
-      request.method === "GET"
+      request.method === "GET" &&
+      url.pathname.startsWith("/master/body/")
     ) {
-      const id = url.pathname.split("/").pop();
+      const masterId =
+        url.pathname.split("/").pop();
 
-      const bodyFiles = {
-        front: "/masters/body/front.png",
-        angle45: "/masters/body/angle45.png",
-        side: "/masters/body/side.png",
-        back: "/masters/body/back.png",
-        back45: "/masters/body/back45.png",
-        relaxed: "/masters/body/relaxed.png"
-      };
+      const allowed = [
+        "front",
+        "angle45",
+        "side",
+        "back",
+        "back45",
+        "relaxed"
+      ];
 
-      const assetPath = bodyFiles[id];
-
-      if (!assetPath) {
+      if (!allowed.includes(masterId)) {
         return json(
           {
             ok: false,
-            error: "Unknown body master"
+            error: "Unknown BODY MASTER"
           },
           404
         );
       }
 
-      return serveAsset(request, env, assetPath);
+      return getMasterAsset(
+        request,
+        env,
+        "body",
+        masterId
+      );
     }
 
+
     // ========================================
-    // 9. 存在しないURL
+    // 10. 存在しないURL
     // ========================================
     return json(
       {
@@ -295,140 +549,71 @@ export default {
 
 
 // ==========================================
-// FACE MASTER 自動選択
+// MASTER asset取得
 // ==========================================
-function selectFaceMaster(angle, expression) {
-  if (expression === "smile") {
-    return "smile";
-  }
-
-  switch (angle) {
-    case "right45":
-    case "right_45":
-      return "right45";
-
-    case "left45":
-    case "left_45":
-      return "left45";
-
-    case "down":
-    case "down_angle":
-      return "down_angle";
-
-    case "back":
-    case "rear":
-      return "back";
-
-    case "front":
-    default:
-      return "front";
-  }
-}
-
-
-// ==========================================
-// BODY MASTER 自動選択
-// ==========================================
-function selectBodyMaster(angle, framing, pose) {
-  // 顔アップなら身体MASTERは不要
-  if (
-    framing === "closeup" ||
-    framing === "close_up" ||
-    framing === "face"
-  ) {
-    return null;
-  }
-
-  if (pose === "relaxed") {
-    return "relaxed";
-  }
-
-  switch (angle) {
-    case "back":
-    case "rear":
-      return "back";
-
-    case "back45":
-    case "back_45":
-      return "back45";
-
-    case "side":
-    case "profile":
-      return "side";
-
-    case "right45":
-    case "right_45":
-    case "left45":
-    case "left_45":
-    case "angle45":
-    case "angle_45":
-      return "angle45";
-
-    case "front":
-    default:
-      return "front";
-  }
-}
-
-
-// ==========================================
-// Cloudflare Static AssetsからMASTER取得
-// ==========================================
-async function serveAsset(request, env, assetPath) {
+async function getMasterAsset(
+  request,
+  env,
+  type,
+  masterId
+) {
   if (!env.ASSETS) {
     return json(
       {
         ok: false,
-        error: "ASSETS binding is not configured"
+        error:
+          "ASSETS binding is not configured"
       },
       500
     );
   }
 
-  const requestUrl = new URL(request.url);
+  const assetUrl = new URL(request.url);
 
-  const assetUrl = new URL(
-    assetPath,
-    requestUrl.origin
+  assetUrl.pathname =
+    `/masters/${type}/${masterId}.png`;
+
+  assetUrl.search = "";
+
+  const assetRequest = new Request(
+    assetUrl.toString(),
+    {
+      method: "GET",
+      headers: request.headers
+    }
   );
 
-  const assetResponse = await env.ASSETS.fetch(
-    new Request(assetUrl.toString(), {
-      method: "GET"
-    })
-  );
+  const response =
+    await env.ASSETS.fetch(assetRequest);
 
-  if (!assetResponse.ok) {
+  if (!response.ok) {
     return json(
       {
         ok: false,
-        error: "Master image not found",
-        path: assetPath
+        error: "MASTER asset not found",
+        type,
+        masterId,
+        status: response.status
       },
-      assetResponse.status
+      404
     );
   }
 
-  const headers = new Headers(assetResponse.headers);
+  const headers =
+    new Headers(response.headers);
 
-  headers.set("Cache-Control", "private, no-store");
-  headers.set("X-Yuzuho-Master", "true");
+  headers.set(
+    "Content-Type",
+    "image/png"
+  );
 
-  return new Response(assetResponse.body, {
-    status: assetResponse.status,
-    headers
-  });
-}
-
-
-// ==========================================
-// 文字列正規化
-// ==========================================
-function normalize(value) {
-  return String(value)
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "_");
+  return new Response(
+    response.body,
+    {
+      status: response.status,
+      headers
+    }
+  );
 }
 
 
@@ -441,7 +626,8 @@ function json(data, status = 200) {
     {
       status,
       headers: {
-        "Content-Type": "application/json; charset=utf-8"
+        "Content-Type":
+          "application/json; charset=utf-8"
       }
     }
   );
@@ -449,17 +635,23 @@ function json(data, status = 200) {
 
 
 // ==========================================
-// X APIレスポンスをそのまま返す
+// X APIレスポンスを返す
 // ==========================================
 async function proxyJson(response) {
-  const text = await response.text();
+  const text =
+    await response.text();
 
-  return new Response(text, {
-    status: response.status,
-    headers: {
-      "Content-Type":
-        response.headers.get("Content-Type") ||
-        "application/json; charset=utf-8"
+  return new Response(
+    text,
+    {
+      status: response.status,
+      headers: {
+        "Content-Type":
+          response.headers.get(
+            "Content-Type"
+          ) ||
+          "application/json; charset=utf-8"
+      }
     }
-  });
+  );
 }
