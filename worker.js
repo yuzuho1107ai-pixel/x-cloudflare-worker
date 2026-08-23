@@ -12,7 +12,8 @@ export default {
         features: {
           x: true,
           masterAssets: true,
-          publicMasterAssets: true
+          publicMasterAssets: true,
+          openAIImageGeneration: true
         }
       });
     }
@@ -20,19 +21,7 @@ export default {
 
     // ========================================
     // 2. PUBLIC MASTER
-    //
-    // ここだけ認証なし。
-    // Custom GPT / 画像生成側から直接参照するため。
-    //
-    // FACE:
-    // /master-public/face/front.png
-    // /master-public/face/right45.png
-    // ...
-    //
-    // BODY:
-    // /master-public/body/front.png
-    // /master-public/body/angle45.png
-    // ...
+    // 認証なしで画像生成APIから参照可能にする
     // ========================================
     if (
       request.method === "GET" &&
@@ -96,20 +85,15 @@ export default {
         );
       }
 
-      // public/masters/... をCloudflare Assetsから取得
       const assetUrl = new URL(request.url);
       assetUrl.pathname = `/masters/${type}/${masterId}.png`;
       assetUrl.search = "";
 
-      const assetRequest = new Request(
-        assetUrl.toString(),
-        {
-          method: "GET",
-          headers: request.headers
-        }
+      const response = await env.ASSETS.fetch(
+        new Request(assetUrl.toString(), {
+          method: "GET"
+        })
       );
-
-      const response = await env.ASSETS.fetch(assetRequest);
 
       if (!response.ok) {
         return json(
@@ -125,10 +109,7 @@ export default {
       }
 
       const headers = new Headers(response.headers);
-
       headers.set("Content-Type", "image/png");
-
-      // MASTER自体は変更頻度が低いためキャッシュ
       headers.set(
         "Cache-Control",
         "public, max-age=3600"
@@ -173,8 +154,7 @@ export default {
         return json(
           {
             ok: false,
-            error:
-              "X_ACCESS_TOKEN is not configured"
+            error: "X_ACCESS_TOKEN is not configured"
           },
           500
         );
@@ -207,8 +187,7 @@ export default {
         return json(
           {
             ok: false,
-            error:
-              "X_ACCESS_TOKEN is not configured"
+            error: "X_ACCESS_TOKEN is not configured"
           },
           500
         );
@@ -248,8 +227,7 @@ export default {
           headers: {
             Authorization:
               `Bearer ${env.X_ACCESS_TOKEN}`,
-            "Content-Type":
-              "application/json"
+            "Content-Type": "application/json"
           },
           body: JSON.stringify({
             text: body.text
@@ -341,6 +319,183 @@ export default {
           : "normal";
 
 
+      let faceMaster = "front";
+
+      if (expression === "smile") {
+        faceMaster = "smile";
+      } else {
+        switch (angle) {
+          case "right45":
+            faceMaster = "right45";
+            break;
+
+          case "left45":
+            faceMaster = "left45";
+            break;
+
+          case "down_angle":
+            faceMaster = "down_angle";
+            break;
+
+          case "back":
+            faceMaster = "back";
+            break;
+
+          default:
+            faceMaster = "front";
+        }
+      }
+
+
+      let bodyMaster = "front";
+
+      if (pose === "relaxed") {
+        bodyMaster = "relaxed";
+      } else {
+        switch (angle) {
+          case "right45":
+          case "left45":
+          case "down_angle":
+            bodyMaster = "angle45";
+            break;
+
+          case "side":
+            bodyMaster = "side";
+            break;
+
+          case "back45":
+            bodyMaster = "back45";
+            break;
+
+          case "back":
+            bodyMaster = "back";
+            break;
+
+          default:
+            bodyMaster = "front";
+        }
+      }
+
+
+      const origin = url.origin;
+
+      const faceUrl =
+        `${origin}/master-public/face/${faceMaster}.png`;
+
+      const bodyUrl =
+        `${origin}/master-public/body/${bodyMaster}.png`;
+
+
+      return json({
+        ok: true,
+
+        request: {
+          angle,
+          framing,
+          expression,
+          pose
+        },
+
+        selected: {
+          face: {
+            id: faceMaster,
+            url: faceUrl
+          },
+
+          body: {
+            id: bodyMaster,
+            url: bodyUrl
+          }
+        },
+
+        instructions: {
+          face:
+            "Use FACE MASTER as Yuzuho identity reference.",
+          body:
+            "Use BODY MASTER as Yuzuho body identity reference.",
+          preserve:
+            "Preserve facial identity, hair length, hair texture, hairstyle and body proportions.",
+          scene:
+            "Do not copy clothing, background, lighting or scene from MASTER images unless explicitly requested."
+        }
+      });
+    }
+
+
+    // ========================================
+    // 8. YUZUHO画像生成
+    //
+    // POST /image/generate
+    //
+    // MASTER選択までWorker側で自動実行し、
+    // FACE/BODY MASTERをOpenAIへ実画像入力する
+    // ========================================
+    if (
+      url.pathname === "/image/generate" &&
+      request.method === "POST"
+    ) {
+      if (!env.OPENAI_API_KEY) {
+        return json(
+          {
+            ok: false,
+            error: "OPENAI_API_KEY is not configured"
+          },
+          500
+        );
+      }
+
+      let body;
+
+      try {
+        body = await request.json();
+      } catch {
+        return json(
+          {
+            ok: false,
+            error: "Invalid JSON"
+          },
+          400
+        );
+      }
+
+
+      const prompt =
+        typeof body.prompt === "string"
+          ? body.prompt.trim()
+          : "";
+
+      if (!prompt) {
+        return json(
+          {
+            ok: false,
+            error: "prompt is required"
+          },
+          400
+        );
+      }
+
+
+      const angle =
+        typeof body.angle === "string"
+          ? body.angle
+          : "front";
+
+      const framing =
+        typeof body.framing === "string"
+          ? body.framing
+          : "upper_body";
+
+      const expression =
+        typeof body.expression === "string"
+          ? body.expression
+          : "neutral";
+
+      const pose =
+        typeof body.pose === "string"
+          ? body.pose
+          : "normal";
+
+
       // --------------------------------------
       // FACE MASTER選択
       // --------------------------------------
@@ -405,60 +560,189 @@ export default {
       }
 
 
-      // --------------------------------------
-      // 公開MASTER URL
-      // --------------------------------------
       const origin = url.origin;
 
-      const faceUrl =
+      const faceMasterUrl =
         `${origin}/master-public/face/${faceMaster}.png`;
 
-      const bodyUrl =
+      const bodyMasterUrl =
         `${origin}/master-public/body/${bodyMaster}.png`;
+
+
+      const imagePrompt = `
+Create a new social-media-style photograph of Yuzuho.
+
+The two supplied images are identity references for the SAME adult fictional character.
+
+FACE MASTER:
+Preserve Yuzuho's recognizable facial identity, facial proportions, facial structure, eyes, nose, lips, jawline, ears, forehead, head shape, bangs, hairstyle, hair texture, hair density and especially the existing hair length.
+
+BODY MASTER:
+Preserve Yuzuho's established physique, shoulder width, torso proportions, waist, hips, arm proportions, leg proportions and overall silhouette.
+
+IMPORTANT:
+- Do not redesign her face.
+- Do not make her hair longer or shorter.
+- Do not change her hair texture.
+- Do not alter her body type.
+- Do not copy the MASTER clothing or background unless requested.
+- The MASTER images define identity, not the new scene.
+- Keep the result photorealistic and like a natural smartphone SNS photo.
+- Avoid an overly polished AI portrait look.
+- Avoid excessive beauty retouching.
+- Keep the person naturally integrated into the environment.
+
+Requested scene:
+${prompt}
+      `.trim();
+
+
+      // --------------------------------------
+      // OpenAI Responses API
+      // FACE/BODY MASTERをinput_imageとして実際に渡す
+      // --------------------------------------
+      const openaiResponse = await fetch(
+        "https://api.openai.com/v1/responses",
+        {
+          method: "POST",
+          headers: {
+            Authorization:
+              `Bearer ${env.OPENAI_API_KEY}`,
+            "Content-Type": "application/json"
+          },
+
+          body: JSON.stringify({
+            model: "gpt-5",
+
+            input: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "input_text",
+                    text: imagePrompt
+                  },
+                  {
+                    type: "input_image",
+                    image_url: faceMasterUrl,
+                    detail: "high"
+                  },
+                  {
+                    type: "input_image",
+                    image_url: bodyMasterUrl,
+                    detail: "high"
+                  }
+                ]
+              }
+            ],
+
+            tools: [
+              {
+                type: "image_generation",
+                model: "gpt-image-1.5",
+                input_fidelity: "high",
+                quality: "high",
+                size: "1024x1536",
+                output_format: "png"
+              }
+            ],
+
+            tool_choice: {
+              type: "image_generation"
+            }
+          })
+        }
+      );
+
+
+      let result;
+
+      try {
+        result =
+          await openaiResponse.json();
+      } catch {
+        return json(
+          {
+            ok: false,
+            error:
+              "OpenAI returned a non-JSON response",
+            status: openaiResponse.status
+          },
+          502
+        );
+      }
+
+
+      if (!openaiResponse.ok) {
+        return json(
+          {
+            ok: false,
+            error:
+              "OpenAI image generation failed",
+            status: openaiResponse.status,
+            details: result
+          },
+          openaiResponse.status
+        );
+      }
+
+
+      // --------------------------------------
+      // image_generation_callを探す
+      // --------------------------------------
+      const imageCall =
+        Array.isArray(result.output)
+          ? result.output.find(
+              item =>
+                item.type ===
+                "image_generation_call"
+            )
+          : null;
+
+
+      if (
+        !imageCall ||
+        !imageCall.result
+      ) {
+        return json(
+          {
+            ok: false,
+            error:
+              "No generated image was returned",
+            responseId:
+              result.id || null
+          },
+          500
+        );
+      }
 
 
       return json({
         ok: true,
 
-        request: {
-          angle,
-          framing,
-          expression,
-          pose
-        },
-
-        selected: {
+        masters: {
           face: {
             id: faceMaster,
-            url: faceUrl
+            url: faceMasterUrl
           },
-
           body: {
             id: bodyMaster,
-            url: bodyUrl
+            url: bodyMasterUrl
           }
         },
 
-        instructions: {
-          face:
-            "Use FACE MASTER only as Yuzuho identity, facial structure, facial proportions, eyes, nose, mouth, jawline and hairstyle reference.",
-
-          body:
-            "Use BODY MASTER only as Yuzuho body identity, proportions, silhouette and physique reference.",
-
-          preserve:
-            "Do not redesign Yuzuho's face, facial proportions, body proportions or hairstyle unless explicitly requested.",
-
-          scene:
-            "Do not copy clothing, background, lighting or scene from MASTER images unless explicitly requested."
+        generation: {
+          visualReferenceUsed: true,
+          inputFidelity: "high",
+          format: "png",
+          imageBase64: imageCall.result
         }
       });
     }
 
 
     // ========================================
-    // 8. 従来の認証付きFACE MASTER
-    // GET /master/face/{masterId}
+    // 9. 認証付きFACE MASTER
     // ========================================
     if (
       request.method === "GET" &&
@@ -496,8 +780,7 @@ export default {
 
 
     // ========================================
-    // 9. 従来の認証付きBODY MASTER
-    // GET /master/body/{masterId}
+    // 10. 認証付きBODY MASTER
     // ========================================
     if (
       request.method === "GET" &&
@@ -535,7 +818,7 @@ export default {
 
 
     // ========================================
-    // 10. 存在しないURL
+    // 11. 存在しないURL
     // ========================================
     return json(
       {
@@ -568,29 +851,30 @@ async function getMasterAsset(
     );
   }
 
-  const assetUrl = new URL(request.url);
+  const assetUrl =
+    new URL(request.url);
 
   assetUrl.pathname =
     `/masters/${type}/${masterId}.png`;
 
   assetUrl.search = "";
 
-  const assetRequest = new Request(
-    assetUrl.toString(),
-    {
-      method: "GET",
-      headers: request.headers
-    }
-  );
-
   const response =
-    await env.ASSETS.fetch(assetRequest);
+    await env.ASSETS.fetch(
+      new Request(
+        assetUrl.toString(),
+        {
+          method: "GET"
+        }
+      )
+    );
 
   if (!response.ok) {
     return json(
       {
         ok: false,
-        error: "MASTER asset not found",
+        error:
+          "MASTER asset not found",
         type,
         masterId,
         status: response.status
@@ -635,7 +919,7 @@ function json(data, status = 200) {
 
 
 // ==========================================
-// X APIレスポンスを返す
+// X APIレスポンス
 // ==========================================
 async function proxyJson(response) {
   const text =
